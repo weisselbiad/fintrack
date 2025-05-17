@@ -1,0 +1,157 @@
+version: "3.8"
+
+services:
+  # Database
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: fintrack
+      POSTGRES_PASSWORD: localdevpassword
+      POSTGRES_DB: fintrack
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fintrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Authentication Service
+  auth:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=fintrack
+      - DB_PASSWORD=localdevpassword
+      - DB_NAME=fintrack
+      - JWT_SECRET=dev_secret_key_change_in_production
+    ports:
+      - "8081:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./services/auth:/app
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+  # Transactions Service
+  transactions:
+    build:
+      context: ./services/transactions
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=fintrack
+      - DB_PASSWORD=localdevpassword
+      - DB_NAME=fintrack
+      - AUTH_SERVICE_URL=http://auth:8000
+    ports:
+      - "8082:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_started
+    volumes:
+      - ./services/transactions:/app
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+  # Budget Service
+  budget:
+    build:
+      context: ./services/budget
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=fintrack
+      - DB_PASSWORD=localdevpassword
+      - DB_NAME=fintrack
+      - AUTH_SERVICE_URL=http://auth:8000
+      - TRANSACTIONS_SERVICE_URL=http://transactions:8000
+    ports:
+      - "8083:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      transactions:
+        condition: service_started
+    volumes:
+      - ./services/budget:/app
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+  # Analytics Service
+  analytics:
+    build:
+      context: ./services/analytics
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=fintrack
+      - DB_PASSWORD=localdevpassword
+      - DB_NAME=fintrack
+      - AUTH_SERVICE_URL=http://auth:8000
+      - TRANSACTIONS_SERVICE_URL=http://transactions:8000
+      - BUDGET_SERVICE_URL=http://budget:8000
+    ports:
+      - "8084:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      transactions:
+        condition: service_started
+      budget:
+        condition: service_started
+    volumes:
+      - ./services/analytics:/app
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+
+  # API Gateway (Traefik)
+  traefik:
+    image: traefik:v2.9
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080" # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      - REACT_APP_API_URL=http://localhost
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`fintrack.localhost`)"
+      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
+
+volumes:
+  postgres-data:
